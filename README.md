@@ -59,6 +59,8 @@ python tools/export_manifest.py <build 目录> <输出目录> "固件名称" 版
 
 ## 从源码运行 / 打包
 
+代码结构、设计说明和发布流程见 [开发文档](docs/DEVELOPMENT.md)。
+
 需要 Python 3.12+，Windows、macOS、Linux 都可以运行：
 
 ```bash
