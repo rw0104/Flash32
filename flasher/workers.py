@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from . import backups, catalog, esptool_jobs, manifest, provision
+from . import backups, catalog, esptool_jobs, manifest, provision, updater
 
 
 class JobFailed(Exception):
@@ -55,7 +55,7 @@ class Job(QThread):
             ok, key, detail, result = False, "msg_stopped", "", None
         except JobFailed as exc:
             ok, key, detail, result = False, exc.key, exc.detail, exc.result
-        except (manifest.ManifestError, provision.ProvisionError) as exc:
+        except (manifest.ManifestError, provision.ProvisionError, updater.UpdateError) as exc:
             ok, key, detail, result = False, str(exc), getattr(exc, "detail", ""), None
         except Exception as exc:     # network, OS, serial: show it, don't crash
             ok, key, detail, result = False, "err_unexpected", f"{type(exc).__name__}: {exc}", None
@@ -402,3 +402,29 @@ class MonitorJob(Job):
 def _strip_ansi(text: str) -> str:
     import re
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+class UpdateCheckJob(Job):
+    """The latest Flash32 release."""
+
+    def work(self):
+        return True, "", "", updater.latest_release()
+
+
+class UpdateJob(Job):
+    """Downloads, checks and unpacks a Flash32 release, ready to swap in."""
+
+    def __init__(self, release: updater.Release, parent=None):
+        super().__init__(parent)
+        self.release = release
+
+    def work(self):
+        self.stage.emit("stage_downloading_update")
+        self.progress.emit(0.0)
+        work = updater.work_folder(self.release.version)
+        shutil.rmtree(work, ignore_errors=True)
+        archive = updater.download(self.release, work, self.progress.emit, lambda: self.stopped)
+        self.emit_log(f"{archive.name}  sha256 {self.release.sha256}  ok")
+        new = updater.unpack(archive, work / "new")
+        self.progress.emit(1.0)
+        return True, "msg_update_ready", "", (new, work)

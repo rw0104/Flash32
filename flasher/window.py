@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import __version__, backups, catalog, devices, esptool_jobs, i18n, manifest, provision, workers
+from . import __version__, backups, catalog, devices, esptool_jobs, i18n, manifest, provision, updater, workers
 from .i18n import tr
 
 CH340_DRIVER = "https://www.wch.cn/downloads/CH341SER_EXE.html"
@@ -69,6 +69,8 @@ class MainWindow(QMainWindow):
         self.job: workers.Job | None = None        # flash, detect, setup, monitor: one at a time
         self.loader: workers.Job | None = None     # catalog and manifest loading
         self.catalog_job: workers.Job | None = None  # lists every source's options
+        self.update_check: workers.Job | None = None
+        self.release: updater.Release | None = None  # a newer Flash32, once found
         self.detected: esptool_jobs.ChipInfo | None = None
         self._detected_port = ""
         self.backup_folder = backup_folder()
@@ -114,6 +116,7 @@ class MainWindow(QMainWindow):
         self.port_timer.timeout.connect(self._poll_ports)
         self.port_timer.start(PORT_POLL_MS)
         QTimer.singleShot(600, self._auto_detect)
+        QTimer.singleShot(3000, lambda: self._check_update(manual=False))
 
     # ---- small helpers ---------------------------------------------------
 
@@ -170,7 +173,12 @@ class MainWindow(QMainWindow):
         self.lang_combo.setCurrentIndex(max(0, self.lang_combo.findData(i18n.language())))
         self.lang_combo.currentIndexChanged.connect(self._language_changed)
         row.addWidget(self.lang_combo)
-        version = _label(f"v{__version__}", "VersionLabel")
+        self.update_btn = _button("LinkButton", lambda: self.release and self._offer_update(self.release))
+        self.update_btn.setVisible(False)
+        row.addWidget(self.update_btn)
+        version = _button("VersionButton", lambda: self._check_update(manual=True))
+        version.setText(f"v{__version__}")
+        self._t(version.setToolTip, "check_updates")
         row.addWidget(version)
         return row
 
@@ -1179,6 +1187,76 @@ class MainWindow(QMainWindow):
         self.backup_folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_folder)))
 
+    # ---- updating Flash32 ----------------------------------------------------
+
+    def _check_update(self, manual: bool) -> None:
+        """Looks for a newer release: quietly at startup, with an answer when asked."""
+        if self.update_check and self.update_check.isRunning():
+            return
+
+        def done(ok, _key, detail, release):
+            if not ok:
+                if manual:
+                    self._fail("err_update_check", detail)
+                return
+            if not updater.is_newer(release.version):
+                if manual:
+                    QMessageBox.information(self, tr("update_title"), tr("update_latest", version=__version__))
+                return
+            self.release = release
+            self.update_btn.setText(tr("update_available", version=release.version))
+            self.update_btn.setVisible(True)
+            self.log_event(tr("update_available", version=release.version))
+            if manual:
+                self._offer_update(release)
+
+        self.update_check = workers.UpdateCheckJob(self)
+        self.update_check.done.connect(done)
+        self.update_check.start()
+
+    def _offer_update(self, release: updater.Release) -> None:
+        notes = release.notes.strip()
+        if len(notes) > 1200:
+            notes = notes[:1200].rstrip() + "…"
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("update_title"))
+        box.setText(tr("update_prompt", version=release.version, current=__version__))
+        box.setDetailedText(notes)
+        install = None
+        if updater.can_self_update():
+            install = box.addButton(tr("update_now"), QMessageBox.ButtonRole.AcceptRole)
+        else:
+            box.setInformativeText(tr("update_manual_only"))
+        page = box.addButton(tr("update_page"), QMessageBox.ButtonRole.ActionRole)
+        box.addButton(tr("update_later"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is page:
+            QDesktopServices.openUrl(QUrl(release.page))
+        elif install is not None and box.clickedButton() is install:
+            self._install_update(release)
+
+    def _install_update(self, release: updater.Release) -> None:
+        if self.busy:
+            self.set_status("update_busy", "", "warning")
+            return
+
+        def done(ok, key, detail, result):
+            if not ok:
+                self._fail(key, detail)
+                return
+            self.set_status(key, "", "success")
+            new, work = result
+            QMessageBox.information(self, tr("update_title"), tr("update_ready", version=release.version))
+            try:
+                updater.launch_installer(new, work)
+            except OSError as exc:
+                self._fail("err_unexpected", str(exc))
+                return
+            self.close()
+
+        self.log_event(f"Flash32 {__version__} → {release.version}")
+        self._start_job(workers.UpdateJob(release, self), done)
+
     def _write_setup(self) -> None:
         port = self._current_port()
         if not port or self.busy:
@@ -1239,7 +1317,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.port_timer.stop()
-        running = [j for j in (self.job, self.loader, self.catalog_job) if j and j.isRunning()]
+        running = [j for j in (self.job, self.loader, self.catalog_job, self.update_check) if j and j.isRunning()]
         if running:
             self._closing = True
             for job in running:

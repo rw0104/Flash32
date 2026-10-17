@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 from flasher import catalog, devices, esptool_jobs, i18n, manifest, provision
@@ -388,6 +389,99 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(len(backups.list_backups(Path(tmp))), 1)
 
 
+class UpdaterTests(unittest.TestCase):
+    RELEASE = {
+        "tag_name": "v0.4.0", "html_url": "https://github.com/rw0104/Flash32/releases/tag/v0.4.0",
+        "body": "notes", "assets": [
+            {"name": "other.zip", "browser_download_url": "https://x/other.zip", "digest": "sha256:" + "1" * 64},
+            {"name": "Flash32-win64.zip", "browser_download_url": "https://x/Flash32-win64.zip", "size": 3,
+             "digest": "sha256:" + "A" * 64}]}
+
+    def test_versions(self):
+        from flasher import updater
+        self.assertEqual(updater.parse_version("v0.10.2"), (0, 10, 2))
+        self.assertTrue(updater.is_newer("0.10.0", "0.9.9"))
+        self.assertTrue(updater.is_newer("v1.0", "0.9"))
+        self.assertFalse(updater.is_newer("0.3.0", "0.3.0"))
+        self.assertFalse(updater.is_newer("garbage", "0.3.0"))
+
+    def test_release_and_its_checksum(self):
+        from flasher import updater
+        release = updater.parse_release(self.RELEASE)
+        self.assertEqual((release.version, release.asset_url, release.sha256),
+                         ("0.4.0", "https://x/Flash32-win64.zip", "a" * 64))
+        # Older releases only state it in the notes.
+        old = dict(self.RELEASE, body="SHA-256  Flash32-win64.zip  " + "B" * 64,
+                   assets=[{"name": "Flash32-win64.zip", "browser_download_url": "https://x/z"}])
+        self.assertEqual(updater.parse_release(old).sha256, "b" * 64)
+        self.assertEqual(updater.parse_release(dict(old, body="")).sha256, "")
+
+    def test_download_is_verified(self):
+        import hashlib
+        from flasher import updater
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "src.zip"
+            source.write_bytes(b"zip")
+            good = updater.Release("0.4.0", "v0.4.0", "", "", source.as_uri(), 3, hashlib.sha256(b"zip").hexdigest())
+            self.assertEqual(updater.download(good, Path(tmp) / "a").read_bytes(), b"zip")
+            bad = updater.Release("0.4.0", "v0.4.0", "", "", source.as_uri(), 3, "0" * 64)
+            with self.assertRaisesRegex(updater.UpdateError, "err_update_checksum"):
+                updater.download(bad, Path(tmp) / "b")
+            self.assertFalse((Path(tmp) / "b" / updater.ASSET).exists())
+            unchecked = updater.Release("0.4.0", "v0.4.0", "", "", source.as_uri(), 3, "")
+            with self.assertRaisesRegex(updater.UpdateError, "err_update_checksum"):
+                updater.download(unchecked, Path(tmp) / "c")
+
+    def test_unpack_finds_the_app(self):
+        import zipfile
+        from flasher import updater
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "a.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("Flash32/Flash32.exe", "exe")
+                zf.writestr("Flash32/_internal/base_library.zip", "lib")
+            self.assertEqual(updater.unpack(archive, Path(tmp) / "out"), Path(tmp) / "out" / "Flash32")
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("Flash32/readme.txt", "no app")
+            with self.assertRaisesRegex(updater.UpdateError, "err_update_bad_zip"):
+                updater.unpack(archive, Path(tmp) / "out2")
+
+    @unittest.skipUnless(sys.platform == "win32", "the swap script is PowerShell")
+    def test_swap_script_replaces_only_the_app_and_rolls_back(self):
+        import shutil
+        import subprocess
+        from flasher import updater
+        exe = Path(shutil.which("hostname.exe") or r"C:\Windows\System32\hostname.exe")
+
+        def run(new_has_internal: bool) -> Path:
+            tmp = Path(tempfile.mkdtemp())
+            target, new, work = tmp / "Desk top's", tmp / "new", tmp / "work"
+            for folder, tag in ((target, b"old"), (new, b"new")):
+                (folder / "_internal").mkdir(parents=True)
+                shutil.copy(exe, folder / "Flash32.exe")
+                (folder / "_internal" / "lib.bin").write_bytes(tag)
+            (target / "_internal" / "stale.bin").write_bytes(b"old only")
+            (target / "notes.txt").write_text("the user's file")
+            if not new_has_internal:
+                shutil.rmtree(new / "_internal")
+            work.mkdir()
+            script = work / "install.ps1"
+            script.write_text(updater.installer_script(new, target, "Flash32.exe", 999999, work), encoding="utf-8-sig")
+            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                           capture_output=True, timeout=120)
+            return target
+
+        target = run(True)
+        self.assertEqual((target / "_internal" / "lib.bin").read_bytes(), b"new")
+        self.assertFalse((target / "_internal" / "stale.bin").exists())
+        self.assertEqual((target / "notes.txt").read_text(), "the user's file")
+        self.assertTrue((target / "Flash32.exe").is_file())
+
+        target = run(False)       # the copy fails: the old version comes back
+        self.assertEqual((target / "_internal" / "lib.bin").read_bytes(), b"old")
+        self.assertTrue((target / "_internal" / "stale.bin").exists())
+
+
 class I18nTests(unittest.TestCase):
     def test_every_key_in_both_languages(self):
         zh, en = set(i18n.STRINGS["zh"]), set(i18n.STRINGS["en"])
@@ -397,7 +491,7 @@ class I18nTests(unittest.TestCase):
     def test_error_codes_are_translated(self):
         import re
         codes = set()
-        for module in ("manifest.py", "provision.py", "workers.py", "esptool_jobs.py", "catalog.py"):
+        for module in ("manifest.py", "provision.py", "workers.py", "esptool_jobs.py", "catalog.py", "updater.py"):
             source = (Path(__file__).resolve().parent.parent / "flasher" / module).read_text(encoding="utf-8")
             codes |= set(re.findall(r'"((?:err|msg|stage|manifest|bin|part|download)_[a-z_]+)"', source))
         for field in provision.PROFILES["muse"]:

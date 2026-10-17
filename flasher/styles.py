@@ -22,9 +22,11 @@ QLabel#LocalBadge {
     color: #46645b; border: 1px solid #c7d0c4; border-radius: 13px;
     padding: 5px 12px; background: #e7ebe1;
 }
-QLabel#VersionLabel {
+QLabel#VersionLabel, QPushButton#VersionButton {
     color: #7c857c; font-family: "Consolas"; font-size: 11px;
 }
+QPushButton#VersionButton { background: transparent; border: none; padding: 4px 2px; }
+QPushButton#VersionButton:hover { color: #2f5d50; text-decoration: underline; }
 QFrame#Rule { background: #d7dcd1; border: none; max-height: 1px; }
 QFrame#Workflow {
     background: #e6e9df; border: 1px solid #d7dcd1; border-radius: 10px;
