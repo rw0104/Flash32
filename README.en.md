@@ -9,7 +9,8 @@ An ESP32 flasher for people who don't use a command line: pick the firmware, plu
 - **Firmware catalog**: open-source projects' live firmware lists. Pick your board and flash. Ships with [Muse Gadget](https://github.com/facebookincubator/muse-gadget-sdk) (Meta's open-source voice gadget, nine official boards).
 - **Any open-source firmware**: paste an ESP Web Tools manifest URL (`manifest.json`), the kind behind the "Install" buttons of ESPHome, WLED, Tasmota and others.
 - **Local files**: a `manifest.json`, a firmware folder, or one `.bin` with a chip and offset.
-- **Checks before writing**: detects the chip and flash size and refuses firmware built for something else.
+- **Detection**: plug a board in and its port is picked and identified: chip, flash size, MAC and the firmware it runs now. Catalog boards that suit it are ticked ✓, and one is picked when it's clear which (a board flashed here before is recognised). Firmware built for something else is refused.
+- **Backup and restore**: before a board's first flash, its whole flash is copied to `Documents\Flash32\backups` (can be turned off; manual backups any time). Restore backup puts the factory firmware back.
 - **Device setup**: after flashing Muse firmware, writes its SDK token (and an optional Qwen TTS key) over serial. Secrets are hidden in the log.
 - **Serial log** for troubleshooting.
 - Chinese and English, following the system language or picked by hand.
@@ -18,7 +19,7 @@ An ESP32 flasher for people who don't use a command line: pick the firmware, plu
 
 1. Download `Flash32-win64.zip`, unzip, run `Flash32.exe`. Keep the `_internal` folder next to it.
 2. **Firmware**: pick a project and your board in the catalog, or switch to URL or Local file.
-3. **Device**: connect the board with a **data-capable** USB cable, click Refresh and choose its port. Detect shows the chip.
+3. **Device**: connect the board with a **data-capable** USB cable, and it's picked and identified for you; if not, click Refresh or Detect.
 4. Click **Flash** and keep the cable in until the bar finishes.
 5. For Muse: fill in the SDK token under Device setup, click Write to device, then add the gadget in the Muse app.
 

@@ -194,12 +194,93 @@ def fetch_part(part: Part, cache: Path, progress=None, cancelled=lambda: False) 
     return target
 
 
-def partitions_end(table: bytes) -> int:
-    """Where the last partition of a binary partition table ends."""
-    end = 0
+@dataclass
+class Partition:
+    label: str
+    type: int
+    subtype: int
+    offset: int
+    size: int
+
+    @property
+    def is_app(self) -> bool:
+        return self.type == 0
+
+
+# Where ESP-IDF puts the partition table: the default, and after a large bootloader.
+PARTITION_TABLE_OFFSETS = (0x8000, 0x10000)
+PARTITION_TABLE_SIZE = 0xC00
+
+
+def partition_table(table: bytes) -> list[Partition]:
+    """The entries of a binary partition table, in order."""
+    parts = []
     for i in range(0, len(table) - 31, 32):
-        magic, _type, _subtype, offset, size = struct.unpack_from("<HBBII", table, i)
+        magic, ptype, subtype, offset, size = struct.unpack_from("<HBBII", table, i)
         if magic != 0x50AA:
             break
-        end = max(end, offset + size)
-    return end
+        label = table[i + 12:i + 28].split(b"\0", 1)[0].decode("utf-8", "replace")
+        parts.append(Partition(label, ptype, subtype, offset, size))
+    return parts
+
+
+def find_partition_table(blob: bytes, base: int) -> list[Partition]:
+    """The partition table in flash read from `base`, at either usual place.
+    The later place wins: firmware with a large bootloader leaves an earlier
+    firmware's table at 0x8000 behind, but a table at 0x10000 would have been
+    overwritten by the app of firmware that uses 0x8000."""
+    for offset in sorted(PARTITION_TABLE_OFFSETS, reverse=True):
+        start = offset - base
+        if 0 <= start < len(blob):
+            parts = partition_table(blob[start:start + PARTITION_TABLE_SIZE])
+            if parts:
+                return parts
+    return []
+
+
+def first_app(parts: list[Partition]) -> Partition | None:
+    """The app a fresh boot would run: factory, else the first OTA slot."""
+    apps = [p for p in parts if p.is_app]
+    factory = [p for p in apps if p.subtype == 0]
+    return (factory or sorted(apps, key=lambda p: p.subtype) or [None])[0]
+
+
+def partitions_end(table: bytes) -> int:
+    """Where the last partition of a binary partition table ends."""
+    return max((p.offset + p.size for p in partition_table(table)), default=0)
+
+
+@dataclass
+class AppInfo:
+    project: str
+    version: str
+    idf: str
+    date: str
+
+    def summary(self) -> str:
+        return " ".join(t for t in (self.project, self.version) if t) + (f" (IDF {self.idf})" if self.idf else "")
+
+
+APP_HEADER_SIZE = 0x100
+_APP_DESC_MAGIC = 0xABCD5432
+
+
+def _text(raw: bytes) -> str:
+    return raw.split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+
+
+def app_description(image: bytes) -> AppInfo | None:
+    """esp_app_desc_t from the start of an app image (it follows the image
+    header and the first segment header), or None if there's no app there."""
+    if len(image) < 176 or image[0] != 0xE9:
+        return None
+    if struct.unpack_from("<I", image, 32)[0] != _APP_DESC_MAGIC:
+        return None
+    return AppInfo(project=_text(image[80:112]), version=_text(image[48:80]),
+                   idf=_text(image[144:176]), date=_text(image[128:144]))
+
+
+def describe_image(image: bytes) -> AppInfo | None:
+    """The app in a full flash image (a backup), found via its partition table."""
+    app = first_app(find_partition_table(image, 0))
+    return app_description(image[app.offset:app.offset + APP_HEADER_SIZE]) if app else None

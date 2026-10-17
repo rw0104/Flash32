@@ -13,9 +13,11 @@ import json
 import re
 import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import manifest
 from .manifest import USER_AGENT
 
 
@@ -32,6 +34,8 @@ class Board:
     manifest_url: str
     usb: list[str] = field(default_factory=list)
     note: str = ""
+    chips: list[str] = field(default_factory=list)   # from its manifest, once read
+    min_flash: int = 0
 
 
 @dataclass
@@ -88,3 +92,33 @@ def fetch_boards(source: Source) -> list[Board]:
         boards += [parse_board(b, source.manifest_url) for b in listed
                    if isinstance(b, dict) and b.get("board") and b["board"] not in known]
     return boards
+
+
+def describe_boards(boards: list[Board], cancelled=lambda: False) -> None:
+    """Fills in each board's chips and flash need from its manifest. A board
+    whose manifest can't be read keeps empty chips: unknown, not unsuitable."""
+    def read(board: Board) -> None:
+        if cancelled():
+            return
+        try:
+            fw = manifest.load_manifest(board.manifest_url)
+        except Exception:
+            return
+        board.chips, board.min_flash = fw.chip_families, fw.min_flash_bytes
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(read, [b for b in boards if not b.chips]))
+
+
+def board_fits(board: Board, family: str, flash_bytes: int) -> bool:
+    if family not in board.chips:
+        return False
+    return not (board.min_flash and flash_bytes and flash_bytes < board.min_flash)
+
+
+def match_boards(boards: list[Board], family: str, flash_bytes: int, usb_id: str = "") -> list[Board]:
+    """Boards whose firmware suits the detected chip and flash. When some also
+    list the port's USB id, only those."""
+    fits = [b for b in boards if board_fits(b, family, flash_bytes)]
+    by_usb = [b for b in fits if usb_id and usb_id.lower() in (u.lower() for u in b.usb)]
+    return by_usb or fits

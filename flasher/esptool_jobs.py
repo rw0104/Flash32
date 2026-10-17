@@ -17,6 +17,7 @@ _MAC = re.compile(r"^MAC:\s+([0-9a-f:]{17})", re.M | re.I)
 _FEATURES = re.compile(r"^Features:\s+(.+)$", re.M)
 _PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s?%")
 _WRITING_AT = re.compile(r"Writing at (0x[0-9a-f]+)", re.I)
+_READING = re.compile(r"Reading from 0x[0-9a-f]+", re.I)
 
 
 @dataclass
@@ -25,6 +26,7 @@ class ChipInfo:
     flash_bytes: int = 0
     mac: str = ""
     features: str = ""
+    firmware: object = None  # manifest.AppInfo of what's on it now, if read
 
 
 def esptool_command(args: list[str]) -> list[str]:
@@ -34,8 +36,21 @@ def esptool_command(args: list[str]) -> list[str]:
     return [sys.executable, "-m", "esptool", *args]
 
 
-def detect_args(port: str, baud: int = 115200) -> list[str]:
-    return ["--port", port, "--baud", str(baud), "flash-id"]
+def detect_args(port: str, baud: int = 115200, after: str = "hard-reset") -> list[str]:
+    return ["--port", port, "--baud", str(baud), "--after", after, "flash-id"]
+
+
+def read_args(port: str, baud: int, chip: str, offset: int, size: int, out: str,
+              after: str = "hard-reset") -> list[str]:
+    args = ["--chip", chip] if chip else []
+    return args + ["--port", port, "--baud", str(baud), "--after", after,
+                   "read-flash", hex(offset), hex(size), out]
+
+
+def reset_args(port: str, chip: str = "") -> list[str]:
+    """A harmless command whose only effect is restarting the board into its app."""
+    args = ["--chip", chip] if chip else []
+    return args + ["--port", port, "--after", "hard-reset", "read-mac"]
 
 
 def flash_args(port: str, baud: int, chip: str, parts: list[tuple[int, str]], erase_all: bool) -> list[str]:
@@ -91,6 +106,14 @@ class FlashProgress:
         # Never step back (a part's 100% line carries the next part's address).
         self._best = max(self._best, value)
         return self._best
+
+
+def read_progress(line: str) -> float | None:
+    """A fraction 0..1 from esptool's "Reading from 0xADDR [==>  ] 45.2%" lines."""
+    pct = _PERCENT.search(line)
+    if not _READING.search(line) or not pct:
+        return None
+    return min(float(pct.group(1)), 100.0) / 100.0
 
 
 # Lines that mean the board never entered its bootloader: tell the user how.

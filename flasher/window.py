@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
@@ -13,10 +13,21 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import __version__, catalog, devices, esptool_jobs, i18n, manifest, provision, workers
+from . import __version__, backups, catalog, devices, esptool_jobs, i18n, manifest, provision, workers
 from .i18n import tr
 
 CH340_DRIVER = "https://www.wch.cn/downloads/CH341SER_EXE.html"
+PORT_POLL_MS = 1500
+
+
+def backup_folder() -> Path:
+    docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+    return Path(docs or Path.home()) / "Flash32" / "backups"
+
+
+def _mac_key(mac: str) -> str:
+    """A MAC as a settings key (no colons, which some backends dislike)."""
+    return mac.replace(":", "").lower()
 
 
 def _label(text: str = "", name: str = "", wrap: bool = False) -> QLabel:
@@ -55,7 +66,13 @@ class MainWindow(QMainWindow):
         self.usb_ids: list[str] = []
         self.job: workers.Job | None = None        # flash, detect, setup, monitor: one at a time
         self.loader: workers.Job | None = None     # catalog and manifest loading
+        self.describer: workers.Job | None = None  # reads each board's chips
         self.detected: esptool_jobs.ChipInfo | None = None
+        self._detected_port = ""
+        self.backup_folder = backup_folder()
+        self._known_ports: set[str] = set()
+        self._missing_polls = 0
+        self._guess: tuple[str, dict] | None = None   # board_* key and values, shown under the board
         self._texts: list = []
         self._status = ("status_ready", "status_ready_detail", "idle", "")
         self._setup_inputs: list[tuple[provision.Field, QLineEdit]] = []
@@ -90,6 +107,11 @@ class MainWindow(QMainWindow):
         self._render_status()
         self._update_buttons()
         self.log_event(f"{tr('app_title')} {__version__}")
+        # Notice boards being plugged in and out, and identify one that's already there.
+        self.port_timer = QTimer(self)
+        self.port_timer.timeout.connect(self._poll_ports)
+        self.port_timer.start(PORT_POLL_MS)
+        QTimer.singleShot(600, self._auto_detect)
 
     # ---- small helpers ---------------------------------------------------
 
@@ -271,6 +293,9 @@ class MainWindow(QMainWindow):
         lay.addLayout(row)
         self.board_note = _label(name="WarningHint", wrap=True)
         lay.addWidget(self.board_note)
+        self.board_guess = _label(name="FieldHint", wrap=True)
+        self.board_guess.setVisible(False)
+        lay.addWidget(self.board_guess)
         self.mode_stack.addWidget(page)
 
         # URL
@@ -345,8 +370,9 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.port_combo = QComboBox()
         self.port_combo.currentIndexChanged.connect(self._port_changed)
+        self.port_combo.activated.connect(lambda _=0: QTimer.singleShot(0, self._auto_detect))
         row.addWidget(self.port_combo, 1)
-        self.refresh_btn = _button(slot=self.refresh_ports)
+        self.refresh_btn = _button(slot=lambda: self.refresh_ports())
         self._t(self.refresh_btn.setText, "refresh")
         row.addWidget(self.refresh_btn)
         self.detect_btn = _button(slot=self._detect)
@@ -378,6 +404,29 @@ class MainWindow(QMainWindow):
         col.addSpacing(4)
         col.addWidget(self.erase_check)
         col.addWidget(self._hint("erase_hint"))
+
+        col.addSpacing(6)
+        col.addWidget(self._field_label("backup_label"))
+        self.auto_backup = QCheckBox()
+        self._t(self.auto_backup.setText, "auto_backup")
+        self.auto_backup.setChecked(self.settings.value("auto_backup", "true") in (True, "true"))
+        self.auto_backup.toggled.connect(lambda on: self.settings.setValue("auto_backup", "true" if on else "false"))
+        col.addWidget(self.auto_backup)
+        col.addWidget(self._hint("auto_backup_hint"))
+        self.backup_state = _label(name="DetectedLabel", wrap=True)
+        self.backup_state.setVisible(False)
+        col.addWidget(self.backup_state)
+        row = QHBoxLayout()
+        self.backup_btn = _button(slot=self._backup)
+        self._t(self.backup_btn.setText, "backup_now")
+        self.restore_btn = _button(slot=self._restore)
+        self._t(self.restore_btn.setText, "restore")
+        row.addWidget(self.backup_btn, 1)
+        row.addWidget(self.restore_btn, 1)
+        col.addLayout(row)
+        folder = _button("LinkButton", self._open_backups)
+        self._t(folder.setText, "open_backups")
+        col.addWidget(folder, 0, Qt.AlignmentFlag.AlignLeft)
 
     def _build_right(self) -> QVBoxLayout:
         col = QVBoxLayout()
@@ -466,6 +515,7 @@ class MainWindow(QMainWindow):
         self._fill_sources(index)
         self._render_firmware()
         self._render_detected()
+        self._render_guess()
         self._render_status()
         self._build_setup(self.profile, keep=True)
 
@@ -475,6 +525,7 @@ class MainWindow(QMainWindow):
         self.mode_buttons[mode].setChecked(True)
         self.mode_stack.setCurrentIndex(("catalog", "url", "local").index(mode))
         self.settings.setValue("mode", mode)
+        self._render_guess()
         if mode == "catalog" and not self.boards and self.sources:
             self._load_boards()
 
@@ -548,12 +599,80 @@ class MainWindow(QMainWindow):
         self.board_combo.blockSignals(False)
         self.log_event(f"{tr(key)}: {len(boards)}")
         self._board_changed()
+        self._describe_boards()
+
+    @property
+    def _catalog_mode(self) -> bool:
+        return self.mode_stack.currentIndex() == 0
+
+    def _board(self) -> catalog.Board | None:
+        i = self.board_combo.currentIndex()
+        return self.boards[i] if self._catalog_mode and 0 <= i < len(self.boards) else None
+
+    def _describe_boards(self) -> None:
+        if self.describer and self.describer.isRunning():
+            self.describer.stop()
+            self.describer.wait(3000)
+        boards = self.boards
+
+        def done(_ok, _key, _detail, _result):
+            if boards is self.boards:
+                self._match_boards()
+
+        self.describer = workers.BoardInfoJob(boards, self)
+        self.describer.done.connect(done)
+        self.describer.start()
+
+    def _match_boards(self) -> None:
+        """Ticks the boards that suit the detected chip, and picks one when it's clear which."""
+        info, current = self.detected, self._board()
+        self._guess = None
+        fits = [b for b in self.boards if info and catalog.board_fits(b, info.family, info.flash_bytes)]
+        if self.board_combo.count() == len(self.boards):      # not while a reload shows "loading"
+            for i, board in enumerate(self.boards):
+                self.board_combo.setItemText(i, f"✓ {board.name}" if board in fits else board.name)
+        if not info or not self._catalog_mode or not self.boards:
+            self._render_guess()
+            return
+        target = None
+        source = self._source()
+        remembered = str(self.settings.value(f"device/{_mac_key(info.mac)}/board", ""))
+        if source and remembered.startswith(source.id + "/"):
+            target = next((b for b in self.boards if b.id == remembered.split("/", 1)[1]), None)
+            if target:
+                self._guess = ("board_remembered", {"name": target.name})
+        if not target and any(b.chips for b in self.boards):
+            port = next((p for p in self._ports if p.device == self._current_port()), None)
+            matches = catalog.match_boards(self.boards, info.family, info.flash_bytes, port.usb_id if port else "")
+            if len(matches) == 1:
+                target = matches[0]
+                self._guess = ("board_matched", {"name": target.name})
+            elif matches:
+                # Several fit: guessing could flash another board's firmware, so the user picks.
+                flash = info.flash_bytes >> 20 if info.flash_bytes else "?"
+                key = "board_candidates" if current in fits else "board_current_wrong"
+                self._guess = (key, {"n": len(fits), "family": info.family, "flash": flash,
+                                     "name": current.name if current else ""})
+            else:
+                self._guess = ("board_none", {"family": info.family})
+        self._render_guess()
+        if target and target is not current:
+            self.board_combo.setCurrentIndex(self.boards.index(target))
+
+    def _render_guess(self) -> None:
+        shown = bool(self._guess) and self._catalog_mode
+        if shown:
+            key, values = self._guess
+            self.board_guess.setText(tr(key, **values))
+            self.board_guess.setObjectName("WarningHint" if key in ("board_current_wrong", "board_none") else "FieldHint")
+            self.board_guess.style().unpolish(self.board_guess)
+            self.board_guess.style().polish(self.board_guess)
+        self.board_guess.setVisible(shown)
 
     def _board_changed(self) -> None:
-        i = self.board_combo.currentIndex()
-        if not (0 <= i < len(self.boards)):
+        board = self._board()
+        if not board:
             return
-        board = self.boards[i]
         self.settings.setValue("board", board.id)
         self.board_note.setText(board.note)
         self.board_note.setVisible(bool(board.note))
@@ -712,15 +831,16 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.port_combo.setCurrentIndex(index)
 
-    def refresh_ports(self) -> None:
+    def refresh_ports(self, prefer: str = "") -> None:
         if self.busy:
             return
-        current = self._current_port() or self.settings.value("port", "")
+        current = prefer or self._current_port() or self.settings.value("port", "")
         try:
             self._ports = devices.list_ports()
         except Exception as exc:
             self._ports = []
             self.log_event(str(exc))
+        self._known_ports = {p.device for p in self._ports}
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
         for port in self._ports:
@@ -734,12 +854,47 @@ class MainWindow(QMainWindow):
         self._port_changed()
 
     def _port_changed(self) -> None:
-        self.detected = None
-        self._render_detected()
         port = self._current_port()
+        if not (self.detected and port == self._detected_port):
+            # Another port, or the board went away: what we knew is stale.
+            self.detected = None
+            self._render_detected()
+            self._match_boards()
         if port:
             self.settings.setValue("port", port)
         self._update_buttons()
+
+    def _poll_ports(self) -> None:
+        """Follows boards being plugged in and out; a new one is selected and identified."""
+        if self.busy:
+            return
+        try:
+            ports = devices.list_ports()
+        except Exception:
+            return
+        now = {p.device for p in ports}
+        if now == self._known_ports:
+            self._missing_polls = 0
+            return
+        # A board on native USB drops off the bus for a moment each time it's
+        # reset (after every flash); only treat it as unplugged once it stays away.
+        if self._current_port() and self._current_port() not in now:
+            self._missing_polls += 1
+            if self._missing_polls * PORT_POLL_MS < 5000:
+                return
+        self._missing_polls = 0
+        new = [p for p in ports if p.device not in self._known_ports and p.likely_esp]
+        self.refresh_ports(prefer=new[0].device if new else "")
+        if new:
+            self.log_event(tr("port_new", port=new[0].label()))
+            # Give a board on native USB a moment to finish enumerating.
+            QTimer.singleShot(800, self._auto_detect)
+
+    def _auto_detect(self) -> None:
+        """Identifies the selected board if it looks like an ESP32 and isn't known yet."""
+        port = next((p for p in self._ports if p.device == self._current_port()), None)
+        if port and port.likely_esp and not self.busy and not self.detected and not self._closing:
+            self._detect()
 
     def _render_detected(self) -> None:
         info = self.detected
@@ -748,9 +903,38 @@ class MainWindow(QMainWindow):
             self.detected_label.setVisible(False)
             return
         flash = info.flash_bytes >> 20 if info.flash_bytes else "?"
-        self.detected_label.setText(tr("detected", family=info.family, flash=flash, mac=info.mac or "?"))
+        lines = [tr("detected", family=info.family, flash=flash, mac=info.mac or "?")]
+        if info.firmware is not None:
+            lines.append(tr("detected_fw", fw=info.firmware.summary()))
+        elif info.family != "ESP8266":
+            lines.append(tr("detected_fw_none"))
+        self.detected_label.setText("\n".join(lines))
         self.detected_label.setToolTip(info.features)
         self.detected_label.setVisible(True)
+        self._render_backup_state()
+
+    def _render_backup_state(self) -> None:
+        info = self.detected
+        if not info or not info.mac:
+            self.backup_state.setVisible(False)
+            return
+        backup = backups.find_for_mac(self.backup_folder, info.mac)
+        self.backup_state.setText(tr("backup_has", name=backup.path.name) if backup else tr("backup_none"))
+        self.backup_state.setVisible(True)
+
+    def _set_detected(self, info: esptool_jobs.ChipInfo | None, firmware: str = "") -> None:
+        """Takes what a job found. Jobs that write the flash don't read the app
+        back, so they say what they wrote in `firmware`."""
+        if not info:
+            return
+        if firmware:
+            info.firmware = manifest.AppInfo(firmware, "", "", "")
+        elif info.firmware is None and self.detected and self.detected.mac == info.mac:
+            info.firmware = self.detected.firmware     # failed before writing: unchanged
+        self.detected = info
+        self._detected_port = self._current_port()
+        self._render_detected()
+        self._match_boards()
 
     # ---- jobs --------------------------------------------------------------
 
@@ -763,6 +947,9 @@ class MainWindow(QMainWindow):
         self.monitor_btn.setEnabled(has_port and (not busy or monitoring))
         self.monitor_btn.setText(tr("stop") if monitoring else tr("monitor"))
         self.detect_btn.setEnabled(not busy and has_port)
+        self.backup_btn.setEnabled(not busy and has_port)
+        self.restore_btn.setEnabled(not busy and has_port)
+        self.auto_backup.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
         self.port_combo.setEnabled(not busy)
         self.baud_combo.setEnabled(not busy)
@@ -810,8 +997,7 @@ class MainWindow(QMainWindow):
             if not ok:
                 self._fail(key, detail)
                 return
-            self.detected = info
-            self._render_detected()
+            self._set_detected(info)
             self.set_status(key, "", "success")
             self.progress.setValue(1000)
 
@@ -828,6 +1014,9 @@ class MainWindow(QMainWindow):
         text = tr("confirm_flash", name=fw.name, port=port)
         if self.erase_check.isChecked():
             text += tr("confirm_erase")
+        info = self.detected
+        if self.auto_backup.isChecked() and info and not backups.find_for_mac(self.backup_folder, info.mac):
+            text += tr("confirm_backup_first")
         answer = QMessageBox.question(self, tr("confirm_flash_title"), text,
                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                       QMessageBox.StandardButton.No)
@@ -837,18 +1026,89 @@ class MainWindow(QMainWindow):
         self.settings.setValue("baud", baud)
         self.log_event(f"{fw.name} → {port} @ {baud}")
 
+        board, source = self._board(), self._source()
+        job = workers.FlashJob(fw, port, baud, self.erase_check.isChecked(),
+                               self.backup_folder if self.auto_backup.isChecked() else None,
+                               board.id if board else "", self)
+
         def done(ok, key, detail, info):
-            if info:
-                self.detected = info
-                self._render_detected()
+            if job.backup_made:
+                self.log_event(f"{tr('msg_backup_done')}: {job.backup_made.path}")
+            self._set_detected(info, f"{fw.name} {fw.version}".strip() if ok else "")
             if not ok:
                 self._fail(key, detail)
                 return
+            if info and info.mac:
+                # Next time this board is plugged in, its board is picked for it.
+                if board and source:
+                    self.settings.setValue(f"device/{_mac_key(info.mac)}/board", f"{source.id}/{board.id}")
+                else:
+                    self.settings.remove(f"device/{_mac_key(info.mac)}/board")
             follow = "msg_flashed_detail" if self._setup_inputs else "msg_flashed_plain"
-            self.set_status(key, follow, "success")
+            self.set_status(key, follow, "success", tr("msg_backup_then_flashed") if job.backup_made else "")
             self.log_event(tr(key))
 
-        self._start_job(workers.FlashJob(fw, port, baud, self.erase_check.isChecked(), self), done)
+        self._start_job(job, done)
+
+    def _backup(self) -> None:
+        port = self._current_port()
+        if not port or self.busy:
+            return
+        board = self._board()
+
+        def done(ok, key, detail, backup):
+            if not ok:
+                self._fail(key, detail)
+                return
+            self._render_backup_state()
+            self.set_status(key, "", "success", str(backup.path))
+            self.log_event(f"{tr(key)}: {backup.path}")
+
+        job = workers.BackupJob(port, self.baud_combo.currentData(), self.backup_folder,
+                                board.id if board else "", self)
+        self._start_job(job, done)
+
+    def _restore(self) -> None:
+        port = self._current_port()
+        if not port or self.busy:
+            return
+        self.backup_folder.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(self, tr("restore_title"), str(self.backup_folder),
+                                              f"{tr('backup_filter')};;All files (*)")
+        if not path:
+            return
+        backup = backups.read_meta(Path(path))
+        if not backup.size:
+            self.set_status("bin_not_found", "", "error")
+            return
+        text = tr("confirm_restore", name=backup.path.name, port=port, chip=backup.chip or tr("unknown"),
+                  mb=f"{backup.size / (1 << 20):.1f}", created=backup.created or tr("unknown"),
+                  fw=backup.firmware or tr("unknown"))
+        if self.detected and backup.mac and backup.mac.lower() != self.detected.mac:
+            text += tr("restore_other_board", mac=backup.mac)
+        answer = QMessageBox.question(self, tr("restore_title"), text,
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        baud = self.baud_combo.currentData()
+        self.log_event(f"{backup.path.name} → {port} @ {baud}")
+
+        def done(ok, key, detail, info):
+            self._set_detected(info, (backup.firmware or backup.path.name) if ok else "")
+            if not ok:
+                self._fail(key, detail)
+                return
+            if info and info.mac:
+                self.settings.remove(f"device/{_mac_key(info.mac)}/board")
+            self.set_status("msg_restored", "msg_restored_detail", "success")
+            self.log_event(tr("msg_restored"))
+
+        self._start_job(workers.RestoreJob(backup, port, baud, self), done)
+
+    def _open_backups(self) -> None:
+        self.backup_folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.backup_folder)))
 
     def _write_setup(self) -> None:
         port = self._current_port()
@@ -909,7 +1169,8 @@ class MainWindow(QMainWindow):
             self.log_event(tr("msg_saved_log"))
 
     def closeEvent(self, event) -> None:
-        running = [j for j in (self.job, self.loader) if j and j.isRunning()]
+        self.port_timer.stop()
+        running = [j for j in (self.job, self.loader, self.describer) if j and j.isRunning()]
         if running:
             self._closing = True
             for job in running:
