@@ -15,6 +15,7 @@ _DETECTED = re.compile(r"Detecting chip type\.\.\.\s*(ESP[0-9A-Z-]+)")
 _FLASH = re.compile(r"Detected flash size:\s*(\d+)\s*([KM])B")
 _MAC = re.compile(r"^MAC:\s+([0-9a-f:]{17})", re.M | re.I)
 _FEATURES = re.compile(r"^Features:\s+(.+)$", re.M)
+_PSRAM = re.compile(r"Embedded PSRAM (\d+)\s*MB", re.I)
 _PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s?%")
 _WRITING_AT = re.compile(r"Writing at (0x[0-9a-f]+)", re.I)
 _READING = re.compile(r"Reading from 0x[0-9a-f]+", re.I)
@@ -27,6 +28,15 @@ class ChipInfo:
     mac: str = ""
     features: str = ""
     firmware: object = None  # manifest.AppInfo of what's on it now, if read
+
+    @property
+    def psram(self) -> str:
+        """PSRAM inside the chip package: "octal" (ESP32-S3R8/R16V), "quad",
+        or "" when there's none or it sits outside the chip, which esptool can't see."""
+        match = _PSRAM.search(self.features)
+        if not match:
+            return ""
+        return "octal" if self.family == "ESP32-S3" and int(match.group(1)) >= 8 else "quad"
 
 
 def esptool_command(args: list[str]) -> list[str]:
@@ -53,11 +63,14 @@ def reset_args(port: str, chip: str = "") -> list[str]:
     return args + ["--port", port, "--after", "hard-reset", "read-mac"]
 
 
-def flash_args(port: str, baud: int, chip: str, parts: list[tuple[int, str]], erase_all: bool) -> list[str]:
+def flash_args(port: str, baud: int, chip: str, parts: list[tuple[int, str]], erase_all: bool,
+               detect_flash_size: bool = False) -> list[str]:
     args = ["--chip", chip, "--port", port, "--baud", str(baud),
             "--before", "default-reset", "--after", "hard-reset", "write-flash"]
     if erase_all:
         args.append("--erase-all")
+    if detect_flash_size:
+        args += ["--flash-size", "detect"]
     for offset, path in sorted(parts):
         args += [hex(offset), path]
     return args

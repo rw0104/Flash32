@@ -162,6 +162,22 @@ class EsptoolTests(unittest.TestCase):
         self.assertEqual(args[-4:], ["read-flash", "0x0", "0x1000000", "out.bin"])
         self.assertIn("hard-reset", esptool_jobs.reset_args("COM4"))
 
+    def test_psram_kind(self):
+        self.assertEqual(esptool_jobs.parse_chip(ESPTOOL_FLASH_ID).psram, "octal")
+        quad = esptool_jobs.parse_chip("Chip type: ESP32-S3 (QFN56)\nFeatures: Wi-Fi, Embedded PSRAM 2MB (AP_3v3)\n")
+        self.assertEqual(quad.psram, "quad")
+        self.assertEqual(esptool_jobs.parse_chip("Chip type: ESP32-C3\nFeatures: Wi-Fi, BLE\n").psram, "")
+
+    def test_flash_size_detect_only_when_asked(self):
+        plain = esptool_jobs.flash_args("COM4", 460800, "esp32", [(0x1000, "b.bin")], False)
+        self.assertNotIn("--flash-size", plain)
+        args = esptool_jobs.flash_args("COM4", 460800, "esp32", [(0x1000, "b.bin")], False, True)
+        self.assertEqual(args[args.index("write-flash") + 1:][:2], ["--flash-size", "detect"])
+
+    def test_sizes(self):
+        self.assertEqual([manifest.parse_size(t) for t in ("16MB", "512KB", "4M", 1024, "", None, "big")],
+                         [16 << 20, 512 << 10, 4 << 20, 1024, 0, 0, 0])
+
     def test_read_progress(self):
         line = "Reading from 0x00800000 [==============>               ]  50.0% 8388608/16777216 bytes... "
         self.assertAlmostEqual(esptool_jobs.read_progress(line), 0.5)
@@ -227,18 +243,85 @@ class ProvisionTests(unittest.TestCase):
 class CatalogAndPortTests(unittest.TestCase):
     def test_bundled_catalog(self):
         sources = catalog.load_catalog()
-        muse = next(s for s in sources if s.id == "muse")
-        self.assertEqual(muse.setup, "muse")
+        by_id = {s.id: s for s in sources}
+        self.assertEqual(list(by_id), ["wled", "tasmota", "esphome", "micropython", "muse"])
+        for source in sources:
+            self.assertTrue(source.text("name", "zh") and source.text("description", "en"), source.id)
+            self.assertIn(source.kind, ("chip", "board"))
+        muse = by_id["muse"]
+        self.assertEqual((muse.kind, muse.setup), ("board", "muse"))
         self.assertIn("{board}", muse.manifest_url)
-        self.assertTrue(muse.text("name", "zh"))
         self.assertIn(muse.setup, provision.PROFILES)
+        self.assertEqual(muse.inline[0].id, "lckfb-szpi-esp32-s3")
+        # Templates are parsed up front, so their chips are known offline.
+        wled = by_id["wled"].inline[0]
+        self.assertIn("ESP32-S3", wled.chips)
+        self.assertTrue(wled.fits("ESP32-S3", 16 << 20))
+        self.assertFalse(wled.fits("ESP32-S3", 2 << 20))
+        self.assertFalse(wled.fits("ESP32-C6", 4 << 20))
+        self.assertTrue(by_id["micropython"].inline[0].fits("ESP8266", 1 << 20))
 
-    def test_board_parsing_strips_html(self):
-        board = catalog.parse_board({"board": "x", "name": "X", "usb": ["303a:1001"],
-                                     "note": "Pick the <b>second</b> port &amp; back up"},
-                                    "https://h/firmware/{board}/manifest.json")
-        self.assertEqual(board.manifest_url, "https://h/firmware/x/manifest.json")
-        self.assertEqual(board.note, "Pick the second port & back up")
+    def test_templates_pick_the_build_for_the_board(self):
+        sources = {s.id: s for s in catalog.load_catalog()}
+        wled = manifest.parse_manifest(manifest.fill_template(
+            sources["wled"].inline[0].template, {"tag": "v16.0.1", "version": "16.0.1"}), "")
+        self.assertEqual(wled.version, "16.0.1")
+
+        def app(fw, *board):
+            build = fw.build_for(*board)
+            return build and build.parts[-1].path.rsplit("/", 1)[-1]
+
+        self.assertEqual(app(wled, "ESP32-S3", 16 << 20, "octal"), "WLED_16.0.1_ESP32-S3_16MB_opi.bin")
+        self.assertEqual(app(wled, "ESP32-S3", 8 << 20, ""), "WLED_16.0.1_ESP32-S3_8MB_none.bin")
+        self.assertEqual(app(wled, "ESP32-S3", 8 << 20, "octal"), "WLED_16.0.1_ESP32-S3_8MB_opi.bin")
+        self.assertEqual(app(wled, "ESP32-S3", 32 << 20, "octal"), "WLED_16.0.1_ESP32-S3_16MB_opi.bin")
+        self.assertEqual(app(wled, "ESP8266", 1 << 20, ""), "WLED_16.0.1_ESP01.bin")
+        self.assertIsNone(app(wled, "ESP32", 2 << 20, ""))
+        self.assertTrue(wled.build_for("ESP32", 4 << 20).detect_flash_size)
+        self.assertIn("partitions_c3_4m.bin", wled.build_for("ESP32", 4 << 20).parts[1].path)
+
+        mp = manifest.parse_manifest(manifest.fill_template(
+            sources["micropython"].inline[0].template, {"date": "20260824", "version": "v1.29.0"}), "")
+        self.assertEqual(app(mp, "ESP32-S3", 16 << 20, "octal"), "ESP32_GENERIC_S3-SPIRAM_OCT-20260824-v1.29.0.bin")
+        self.assertEqual(app(mp, "ESP32-S3", 4 << 20, ""), "ESP32_GENERIC_S3-20260824-v1.29.0.bin")
+        self.assertEqual(app(mp, "ESP32", 4 << 20, ""), "ESP32_GENERIC-20260824-v1.29.0.bin")
+        self.assertEqual(mp.build_for("ESP32", 4 << 20).parts[0].offset, 0x1000)
+        self.assertEqual(app(mp, "ESP8266", 1 << 20, ""), "ESP8266_GENERIC-FLASH_1M-20260824-v1.29.0.bin")
+        self.assertEqual(app(mp, "ESP8266", 4 << 20, ""), "ESP8266_GENERIC-20260824-v1.29.0.bin")
+
+    def test_option_parsing_strips_html(self):
+        option = catalog.parse_option({"board": "x", "name": "X", "usb": ["303a:1001"],
+                                       "note": "Pick the <b>second</b> port &amp; back up"},
+                                      "https://h/firmware/{board}/manifest.json")
+        self.assertEqual(option.manifest_url, "https://h/firmware/x/manifest.json")
+        self.assertEqual(option.note, "Pick the second port & back up")
+
+    def test_tasmota_style_index(self):
+        source = catalog.Source("t", {"en": "T"}, {}, "", index_url="https://x/manifests.json", index_key="release")
+        index = {"release": [
+            {"path": "https://x/manifest_ext/release.tasmota.manifest.json", "name": "Tasmota",
+             "chipFamilies": ["ESP32", "ESP32-S3", "ESP32-P4", "ESP32-P4", "RP2040"]},
+            {"path": "https://x/manifest_ext/release.tasmota-ir.manifest.json", "name": "Tasmota IR",
+             "chipFamilies": ["ESP32", "ESP8266"]},
+            {"name": "broken"}]}
+        original = catalog._get_json
+        catalog._get_json = lambda url: index
+        try:
+            options = catalog.list_options(source)
+        finally:
+            catalog._get_json = original
+        self.assertEqual([o.name for o in options], ["Tasmota", "Tasmota IR"])
+        self.assertEqual(options[0].chips, ["ESP32", "ESP32-S3", "ESP32-P4"])
+        self.assertEqual([o.name for o in catalog.match_options(options, "ESP8266", 4 << 20)], ["Tasmota IR"])
+
+    def test_source_fits_only_once_loaded(self):
+        source = catalog.Source("s", {"en": "S"}, {}, "")
+        self.assertTrue(source.fits("ESP32-C6", 4 << 20))     # not loaded: maybe
+        source.loaded = True
+        source.options = [catalog.Option("a", "A", chips=["ESP32"])]
+        self.assertFalse(source.fits("ESP32-C6", 4 << 20))
+        source.options.append(catalog.Option("b", "B", "https://x/manifest.json"))
+        self.assertTrue(source.fits("ESP32-C6", 4 << 20))     # an unread option: maybe
 
     def test_port_preference(self):
         ports = [devices.Port("COM1", "Communications Port", None, None),
@@ -251,24 +334,23 @@ class CatalogAndPortTests(unittest.TestCase):
         self.assertEqual(devices.pick_default(ports, current="COM1"), "COM1")
         self.assertEqual(devices.pick_default([]), "")
 
-
     def test_board_matching(self):
-        def board(id, chips, min_flash=0, usb=()):
-            return catalog.Board(id, id.upper(), "", list(usb), "", list(chips), min_flash)
+        def option(id, chips, min_flash=0, usb=()):
+            return catalog.Option(id, id.upper(), usb=list(usb), chips=list(chips), min_flash=min_flash)
 
-        boards = [board("box3", ["ESP32-S3"], 8 << 20, ["303a:1001"]),
-                  board("watcher", ["ESP32-S3"], 8 << 20, ["1a86:55d2"]),
-                  board("devkit-n8", ["ESP32-S3"], 12 << 20),
-                  board("c5", ["ESP32-C5"]),
-                  board("unread", [])]
-        ids = lambda found: [b.id for b in found]
-        self.assertEqual(ids(catalog.match_boards(boards, "ESP32-S3", 16 << 20)), ["box3", "watcher", "devkit-n8"])
-        self.assertEqual(ids(catalog.match_boards(boards, "ESP32-S3", 8 << 20)), ["box3", "watcher"])
-        self.assertEqual(ids(catalog.match_boards(boards, "ESP32-S3", 16 << 20, "1A86:55D2")), ["watcher"])
-        # A USB id no board lists narrows nothing.
-        self.assertEqual(len(catalog.match_boards(boards, "ESP32-S3", 16 << 20, "1a86:7523")), 3)
-        self.assertEqual(ids(catalog.match_boards(boards, "ESP32-C5", 4 << 20)), ["c5"])
-        self.assertEqual(catalog.match_boards(boards, "ESP32-C3", 4 << 20), [])
+        options = [option("box3", ["ESP32-S3"], 8 << 20, ["303a:1001"]),
+                   option("watcher", ["ESP32-S3"], 8 << 20, ["1a86:55d2"]),
+                   option("devkit-n8", ["ESP32-S3"], 12 << 20),
+                   option("c5", ["ESP32-C5"]),
+                   option("unread", [])]
+        ids = lambda found: [o.id for o in found]
+        self.assertEqual(ids(catalog.match_options(options, "ESP32-S3", 16 << 20)), ["box3", "watcher", "devkit-n8"])
+        self.assertEqual(ids(catalog.match_options(options, "ESP32-S3", 8 << 20)), ["box3", "watcher"])
+        self.assertEqual(ids(catalog.match_options(options, "ESP32-S3", 16 << 20, "1A86:55D2")), ["watcher"])
+        # A USB id no option lists narrows nothing.
+        self.assertEqual(len(catalog.match_options(options, "ESP32-S3", 16 << 20, "1a86:7523")), 3)
+        self.assertEqual(ids(catalog.match_options(options, "ESP32-C5", 4 << 20)), ["c5"])
+        self.assertEqual(catalog.match_options(options, "ESP32-C3", 4 << 20), [])
 
 
 class BackupTests(unittest.TestCase):
@@ -315,11 +397,12 @@ class I18nTests(unittest.TestCase):
     def test_error_codes_are_translated(self):
         import re
         codes = set()
-        for module in ("manifest.py", "provision.py", "workers.py", "esptool_jobs.py"):
+        for module in ("manifest.py", "provision.py", "workers.py", "esptool_jobs.py", "catalog.py"):
             source = (Path(__file__).resolve().parent.parent / "flasher" / module).read_text(encoding="utf-8")
             codes |= set(re.findall(r'"((?:err|msg|stage|manifest|bin|part|download)_[a-z_]+)"', source))
         for field in provision.PROFILES["muse"]:
             codes |= {field.label, field.hint}
+        codes.discard("manifest_url")       # a catalog field, not a message
         missing = sorted(c for c in codes if c not in i18n.STRINGS["en"])
         self.assertEqual(missing, [])
 

@@ -1,16 +1,184 @@
 {
   "sources": [
     {
-      "id": "muse",
-      "name": {"zh": "Muse Gadget（Meta 开源语音助手）", "en": "Muse Gadget (Meta, open-source voice gadget)"},
+      "id": "wled",
+      "kind": "chip",
+      "name": {"zh": "WLED（LED 灯带控制）", "en": "WLED (LED strip control)"},
       "description": {
-        "zh": "Meta 开源的 Muse 硬件固件：和 Muse App 配对后，按键说话、屏幕显示回复。刷完需要写入在 gadgets.muse.ai 申请的 SDK token。",
-        "en": "Meta's open-source Muse gadget firmware: pair it with the Muse app, push to talk, replies on screen. Needs an SDK token from gadgets.muse.ai after flashing."
+        "zh": "用手机或网页控制 WS2812 等可寻址 LED 灯带，上百种灯效。刷完后连接名为 WLED-AP 的 Wi-Fi（密码 wled1234）完成设置。",
+        "en": "Control WS2812 and other addressable LED strips from a phone or browser, with hundreds of effects. After flashing, join the WLED-AP Wi-Fi (password wled1234) to set it up."
+      },
+      "homepage": "https://kno.wled.ge",
+      "version": {"github": "wled/WLED"},
+      "options": [
+        {
+          "id": "wled",
+          "name": "WLED",
+          "template": {
+            "name": "WLED",
+            "version": "{version}",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {"chipFamily": "ESP32", "flash32": {"flash": "4MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32/bootloader_esp32_8m.bin", "offset": 4096},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_c3_4m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32", "flash32": {"flash": "8MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32/bootloader_esp32_8m.bin", "offset": 4096},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_esp32_8m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32", "flash32": {"flash": "16MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32/bootloader_esp32_8m.bin", "offset": 4096},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_esp32_16m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-C3", "flash32": {"flash": "4MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-c3/bootloader_c3_8m.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_c3_4m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-C3.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-C3", "flash32": {"flash": "8MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-c3/bootloader_c3_8m.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_c3_8m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-C3.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-C3", "flash32": {"flash": "16MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-c3/bootloader_c3_8m.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_c3_16m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-C3.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S2", "flash32": {"flash": "4MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s2/bootloader_s2.bin", "offset": 4096},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s2_4m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S2.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S2", "flash32": {"flash": "8MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s2/bootloader_s2.bin", "offset": 4096},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s2_8m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S2.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S2", "flash32": {"flash": "16MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s2/bootloader_s2.bin", "offset": 4096},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s2_16m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S2.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S3", "flash32": {"flash": "4MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s3/bootloader_s3.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s3_4m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S3_4M_qspi.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S3", "flash32": {"flash": "8MB", "psram": "none", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s3/bootloader_s3.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s3_8m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S3_8MB_none.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S3", "flash32": {"flash": "8MB", "psram": "octal", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s3/bootloader_s3.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s3_8m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S3_8MB_opi.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S3", "flash32": {"flash": "8MB", "psram": "quad", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s3/bootloader_s3.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s3_8m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S3_8MB_qspi.bin", "offset": 65536}]},
+              {"chipFamily": "ESP32-S3", "flash32": {"flash": "16MB", "psram": "octal", "detect_flash_size": true}, "parts": [
+                {"path": "https://install.wled.me/bin/boot/bootloaders/esp32-s3/bootloader_s3.bin", "offset": 0},
+                {"path": "https://install.wled.me/bin/boot/partitions/partitions_s3_16m.bin", "offset": 32768},
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP32-S3_16MB_opi.bin", "offset": 65536}]},
+              {"chipFamily": "ESP8266", "flash32": {"flash": "1MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP01.bin", "offset": 0}]},
+              {"chipFamily": "ESP8266", "flash32": {"flash": "2MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP02.bin", "offset": 0}]},
+              {"chipFamily": "ESP8266", "flash32": {"flash": "4MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://github.com/wled/WLED/releases/download/{tag}/WLED_{version}_ESP8266.bin", "offset": 0}]}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "tasmota",
+      "kind": "chip",
+      "name": {"zh": "Tasmota（智能家居设备）", "en": "Tasmota (smart home devices)"},
+      "description": {
+        "zh": "开源的智能插座、开关、传感器固件，可接入 Home Assistant、MQTT。刷完后连接名为 tasmota-XXXX 的 Wi-Fi 完成设置。变体里有显示屏、红外、蓝牙等专用版本，不确定就用默认的 english 版。",
+        "en": "Open firmware for smart plugs, switches and sensors, with Home Assistant and MQTT. After flashing, join the tasmota-XXXX Wi-Fi to set it up. Variants add displays, IR, Bluetooth and more; the default English build is fine if unsure."
+      },
+      "homepage": "https://tasmota.github.io/docs/",
+      "index_url": "https://raw.githubusercontent.com/tasmota/install/firmware/manifests.json",
+      "index_key": "release"
+    },
+    {
+      "id": "esphome",
+      "kind": "chip",
+      "name": {"zh": "ESPHome（Home Assistant 设备）", "en": "ESPHome (Home Assistant devices)"},
+      "description": {
+        "zh": "ESPHome 的入门固件：刷进去后用 Home Assistant 或 web.esphome.io 给它配 Wi-Fi，再按你的接线生成正式固件，之后通过无线更新。",
+        "en": "ESPHome's starter firmware: after flashing, give it Wi-Fi from Home Assistant or web.esphome.io, then build your own configuration for it and update it over the air."
+      },
+      "homepage": "https://esphome.io",
+      "options": [
+        {"id": "esphome-web", "name": "ESPHome Web", "manifest_url": "https://firmware.esphome.io/esphome-web/manifest.json"}
+      ]
+    },
+    {
+      "id": "micropython",
+      "kind": "chip",
+      "name": {"zh": "MicroPython（用 Python 编程）", "en": "MicroPython (program it in Python)"},
+      "description": {
+        "zh": "在板子上直接运行 Python。刷完后用 Thonny 等编辑器通过串口连接，就能写代码。片内有 PSRAM 时会自动选带 PSRAM 支持的版本。",
+        "en": "Run Python on the board itself. After flashing, connect over serial with an editor such as Thonny and start coding. Boards with in-package PSRAM get the build that uses it."
+      },
+      "homepage": "https://micropython.org",
+      "version": {
+        "page": "https://micropython.org/download/ESP32_GENERIC/",
+        "regex": "ESP32_GENERIC-(?P<date>\\d{8})-(?P<version>v[0-9.]+)\\.bin"
+      },
+      "options": [
+        {
+          "id": "micropython",
+          "name": "MicroPython",
+          "template": {
+            "name": "MicroPython",
+            "version": "{version}",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {"chipFamily": "ESP32", "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC-{date}-{version}.bin", "offset": 4096}]},
+              {"chipFamily": "ESP32", "flash32": {"psram": "quad"}, "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC-SPIRAM-{date}-{version}.bin", "offset": 4096}]},
+              {"chipFamily": "ESP32-S2", "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC_S2-{date}-{version}.bin", "offset": 4096}]},
+              {"chipFamily": "ESP32-S3", "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-{date}-{version}.bin", "offset": 0}]},
+              {"chipFamily": "ESP32-S3", "flash32": {"psram": "octal"}, "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-SPIRAM_OCT-{date}-{version}.bin", "offset": 0}]},
+              {"chipFamily": "ESP32-C3", "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC_C3-{date}-{version}.bin", "offset": 0}]},
+              {"chipFamily": "ESP32-C6", "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP32_GENERIC_C6-{date}-{version}.bin", "offset": 0}]},
+              {"chipFamily": "ESP8266", "flash32": {"flash": "512KB", "detect_flash_size": true}, "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP8266_GENERIC-FLASH_512K-{date}-{version}.bin", "offset": 0}]},
+              {"chipFamily": "ESP8266", "flash32": {"flash": "1MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP8266_GENERIC-FLASH_1M-{date}-{version}.bin", "offset": 0}]},
+              {"chipFamily": "ESP8266", "flash32": {"flash": "2MB", "detect_flash_size": true}, "parts": [
+                {"path": "https://micropython.org/resources/firmware/ESP8266_GENERIC-{date}-{version}.bin", "offset": 0}]}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "muse",
+      "kind": "board",
+      "name": {"zh": "Muse Gadget（语音助手，按板子区分）", "en": "Muse Gadget (voice assistant, per board)"},
+      "description": {
+        "zh": "Meta 开源的 Muse 语音助手固件：和 Muse App 配对后，按键说话、屏幕显示回复。每款板子的固件不同，请确认型号。刷完需要写入在 gadgets.muse.ai 申请的 SDK token。",
+        "en": "Meta's open-source Muse voice assistant: pair it with the Muse app, push to talk, replies on screen. Each board has its own build, so confirm yours. Needs an SDK token from gadgets.muse.ai after flashing."
       },
       "homepage": "https://github.com/facebookincubator/muse-gadget-sdk",
       "boards_url": "https://facebookincubator.github.io/muse-gadget-sdk/boards.json",
       "manifest_url": "https://facebookincubator.github.io/muse-gadget-sdk/firmware/{board}/manifest.json",
-      "setup": "muse"
+      "setup": "muse",
+      "options": [
+        {
+          "id": "lckfb-szpi-esp32-s3",
+          "name": "立创·实战派 ESP32-S3 / LCKFB SZPI ESP32-S3",
+          "manifest_url": "https://github.com/rw0104/muse-gadget-sdk/releases/latest/download/manifest.json",
+          "usb": ["303a:1001", "1a86:7522"],
+          "note": "社区移植版（含千问语音播报），来自 github.com/rw0104/muse-gadget-sdk。Community port with Qwen TTS."
+        }
+      ]
     }
   ]
 }

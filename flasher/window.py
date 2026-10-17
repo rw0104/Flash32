@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -60,19 +61,20 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("flash32", "flash32")
         i18n.set_language(self.settings.value("language", i18n.system_language()))
         self.sources = sources
-        self.boards: list[catalog.Board] = []
+        self.options: list[catalog.Option] = []      # what the option list shows
+        self._fw_key: tuple[str, str] | None = None  # the catalog (source, option) loaded
         self.firmware: manifest.Manifest | None = None
         self.profile = ""
         self.usb_ids: list[str] = []
         self.job: workers.Job | None = None        # flash, detect, setup, monitor: one at a time
         self.loader: workers.Job | None = None     # catalog and manifest loading
-        self.describer: workers.Job | None = None  # reads each board's chips
+        self.catalog_job: workers.Job | None = None  # lists every source's options
         self.detected: esptool_jobs.ChipInfo | None = None
         self._detected_port = ""
         self.backup_folder = backup_folder()
         self._known_ports: set[str] = set()
         self._missing_polls = 0
-        self._guess: tuple[str, dict] | None = None   # board_* key and values, shown under the board
+        self._guess: tuple[str, dict] | None = None   # board_* key and values, shown under the options
         self._texts: list = []
         self._status = ("status_ready", "status_ready_detail", "idle", "")
         self._setup_inputs: list[tuple[provision.Field, QLineEdit]] = []
@@ -99,10 +101,10 @@ class MainWindow(QMainWindow):
         outer.addLayout(body, 1)
         self.setCentralWidget(root)
 
-        self._fill_sources()
         mode = self.settings.value("mode", "catalog")
         self._set_mode(mode if mode in ("catalog", "url", "local") else "catalog")
         self.refresh_ports()
+        self._load_catalog()
         self._render_firmware()
         self._render_status()
         self._update_buttons()
@@ -221,10 +223,13 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(20, 18, 20, 18)
         col.setSpacing(7)
 
-        self._section(col, "01 / FIRMWARE", "section_firmware")
-        self._build_firmware(col)
-        self._section(col, "02 / DEVICE", "section_device")
+        # The board first: what it is decides which firmware is offered.
+        self._section(col, "01 / DEVICE", "section_device")
         self._build_device(col)
+        self._section(col, "02 / FIRMWARE", "section_firmware")
+        self._build_firmware(col)
+        self._section(col, "03 / OPTIONS", "section_options")
+        self._build_options(col)
         self.setup_box = QWidget()
         self.setup_layout = QVBoxLayout(self.setup_box)
         self.setup_layout.setContentsMargins(0, 0, 0, 0)
@@ -273,24 +278,27 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 6, 0, 0)
         lay.setSpacing(6)
+        self.chip_filter = _label(name="DetectedLabel", wrap=True)
+        lay.addWidget(self.chip_filter)
         lay.addWidget(self._field_label("project"))
+        row = QHBoxLayout()
         self.source_combo = QComboBox()
         self.source_combo.currentIndexChanged.connect(self._source_changed)
-        lay.addWidget(self.source_combo)
+        row.addWidget(self.source_combo, 1)
+        self.reload_btn = _button(slot=self._load_catalog)
+        self._t(self.reload_btn.setText, "reload")
+        row.addWidget(self.reload_btn)
+        lay.addLayout(row)
         self.source_desc = _label(name="FieldHint", wrap=True)
         lay.addWidget(self.source_desc)
         self.homepage_btn = _button("LinkButton", self._open_homepage)
         self._t(self.homepage_btn.setText, "homepage")
         lay.addWidget(self.homepage_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        lay.addWidget(self._field_label("board"))
-        row = QHBoxLayout()
-        self.board_combo = QComboBox()
-        self.board_combo.currentIndexChanged.connect(self._board_changed)
-        row.addWidget(self.board_combo, 1)
-        self.reload_btn = _button(slot=self._load_boards)
-        self._t(self.reload_btn.setText, "reload")
-        row.addWidget(self.reload_btn)
-        lay.addLayout(row)
+        self.option_label = _label(name="FieldLabel")
+        lay.addWidget(self.option_label)
+        self.option_combo = QComboBox()
+        self.option_combo.currentIndexChanged.connect(self._option_changed)
+        lay.addWidget(self.option_combo)
         self.board_note = _label(name="WarningHint", wrap=True)
         lay.addWidget(self.board_note)
         self.board_guess = _label(name="FieldHint", wrap=True)
@@ -360,8 +368,10 @@ class MainWindow(QMainWindow):
         lay.setSpacing(2)
         self.fw_name = _label(name="FirmwareName", wrap=True)
         self.fw_meta = _label(name="FirmwareMeta", wrap=True)
+        self.fw_build = _label(name="FirmwareMeta", wrap=True)
         lay.addWidget(self.fw_name)
         lay.addWidget(self.fw_meta)
+        lay.addWidget(self.fw_build)
         col.addSpacing(4)
         col.addWidget(card)
 
@@ -387,6 +397,7 @@ class MainWindow(QMainWindow):
         self.detected_label = _label(name="DetectedLabel", wrap=True)
         col.addWidget(self.detected_label)
 
+    def _build_options(self, col: QVBoxLayout) -> None:
         row = QHBoxLayout()
         row.addWidget(self._field_label("baud"))
         row.addStretch(1)
@@ -511,8 +522,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("language", i18n.language())
         for apply in self._texts:
             apply()
-        index = self.source_combo.currentIndex()
-        self._fill_sources(index)
+        self._fill_sources()
         self._render_firmware()
         self._render_detected()
         self._render_guess()
@@ -520,47 +530,190 @@ class MainWindow(QMainWindow):
         self._build_setup(self.profile, keep=True)
 
     # ---- firmware: catalog -------------------------------------------------
+    #
+    # The catalog follows the board: once a chip is detected, only projects
+    # and options that suit it are offered. A chip-kind project then needs no
+    # choice at all (its manifest has a build per chip); a board-kind one is
+    # narrowed down, and picked for the user only when that's unambiguous.
 
     def _set_mode(self, mode: str) -> None:
         self.mode_buttons[mode].setChecked(True)
         self.mode_stack.setCurrentIndex(("catalog", "url", "local").index(mode))
         self.settings.setValue("mode", mode)
         self._render_guess()
-        if mode == "catalog" and not self.boards and self.sources:
-            self._load_boards()
+        if mode == "catalog" and self._fw_key is None:
+            self._option_changed()      # back from a URL or file: load the catalog pick again
 
-    def _fill_sources(self, index: int = -1) -> None:
+    @property
+    def _catalog_mode(self) -> bool:
+        return self.mode_stack.currentIndex() == 0
+
+    def _load_catalog(self) -> None:
+        if self.catalog_job and self.catalog_job.isRunning():
+            return
+        for source in self.sources:
+            source.loaded = False
+        self._fill_sources()
+        job = workers.CatalogJob(self.sources, self)
+        job.listed.connect(self._fill_sources)
+
+        def done(ok, key, detail, _result):
+            for source in self.sources:
+                if source.error:
+                    self.log_event(f"{source.id}: {tr('boards_failed')} {source.error}")
+            self.log_event(f"{tr(key)}: {sum(len(s.options) for s in self.sources)}" if ok else f"{tr(key)} {detail}")
+            self._fill_sources()
+            self._update_buttons()
+
+        job.done.connect(done)
+        self.catalog_job = job
+        job.start()
+        self._update_buttons()
+
+    def _visible_sources(self) -> list[catalog.Source]:
+        info = self.detected
+        if not info:
+            return self.sources
+        return [s for s in self.sources if s.fits(info.family, info.flash_bytes)]
+
+    def _remembered(self) -> tuple[str, str]:
+        """The (source, option) this board was last flashed with here, if any."""
+        if not self.detected or not self.detected.mac:
+            return "", ""
+        value = str(self.settings.value(f"device/{_mac_key(self.detected.mac)}/firmware", ""))
+        source, _, option = value.partition("/")
+        return source, option
+
+    def _fill_sources(self) -> None:
+        """Lists the projects that suit the board, keeping the current one if it still does."""
+        info = self.detected
+        if info:
+            flash = info.flash_bytes >> 20 if info.flash_bytes else "?"
+            self.chip_filter.setText(tr("chip_filter", family=info.family, flash=flash))
+        else:
+            self.chip_filter.setText(tr("chip_filter_none"))
+        visible = self._visible_sources()
+        current = self._source()
+        wanted = [current.id if current else "", self._remembered()[0], str(self.settings.value("source", ""))]
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
-        for source in self.sources:
+        for source in visible:
             self.source_combo.addItem(source.text("name", i18n.language()), source.id)
-        if index < 0:
-            index = max(0, self.source_combo.findData(self.settings.value("source", "")))
+        index = next((i for i in (self.source_combo.findData(w) for w in wanted if w) if i >= 0), 0)
         self.source_combo.setCurrentIndex(index)
         self.source_combo.blockSignals(False)
         self._render_source()
+        self._fill_options()
 
     def _source(self) -> catalog.Source | None:
-        i = self.source_combo.currentIndex()
-        return self.sources[i] if 0 <= i < len(self.sources) else None
+        source_id = self.source_combo.currentData()
+        return next((s for s in self.sources if s.id == source_id), None)
 
     def _render_source(self) -> None:
         source = self._source()
         self.source_desc.setText(source.text("description", i18n.language()) if source else "")
         self.homepage_btn.setVisible(bool(source and source.homepage))
+        self.option_label.setText(tr("board" if source and source.kind == "board" else "variant"))
 
     def _source_changed(self) -> None:
-        self._render_source()
         source = self._source()
         if source:
             self.settings.setValue("source", source.id)
-        self.boards = []
-        self._load_boards()
+        self._render_source()
+        self._fill_options()
 
     def _open_homepage(self) -> None:
         source = self._source()
         if source and source.homepage:
             QDesktopServices.openUrl(QUrl(source.homepage))
+
+    def _fill_options(self) -> None:
+        source, info = self._source(), self.detected
+        self._guess = None
+        self.options = []
+        self.option_combo.blockSignals(True)
+        self.option_combo.clear()
+        if not source or not source.loaded:
+            self.option_combo.addItem(tr("boards_loading"))
+            self.option_combo.setEnabled(False)
+            self.option_combo.blockSignals(False)
+            self._render_guess()
+            return
+        options = source.options
+        if info:
+            options = [o for o in options if o.fits(info.family, info.flash_bytes) or not o.chips]
+        if not options:
+            self.option_combo.addItem(tr("boards_failed") if source.error else tr("options_none"))
+            self.option_combo.setEnabled(False)
+            self.option_combo.blockSignals(False)
+            self._render_guess()
+            self._option_changed()
+            return
+
+        current = self.option_combo.currentData()
+        remembered_source, remembered = self._remembered()
+        saved = str(self.settings.value(f"option/{source.id}", ""))
+        by_id = {o.id: o for o in options}
+        target = None
+        if remembered_source == source.id and remembered in by_id:
+            target = by_id[remembered]
+            if source.kind == "board":
+                self._guess = ("board_remembered", {"name": target.name})
+        elif source.kind == "board" and info:
+            port = next((p for p in self._ports if p.device == self._current_port()), None)
+            matches = catalog.match_options(options, info.family, info.flash_bytes, port.usb_id if port else "")
+            if len(matches) == 1:
+                target = matches[0]
+                self._guess = ("board_matched", {"name": target.name})
+            else:
+                # Several fit: guessing could flash another board's firmware, so the user picks.
+                target = by_id.get(current) or by_id.get(saved)
+                flash = info.flash_bytes >> 20 if info.flash_bytes else "?"
+                self._guess = ("board_candidates", {"n": len(options), "family": info.family, "flash": flash})
+        else:
+            target = by_id.get(current) or by_id.get(saved)
+            if not target and source.kind == "chip":
+                target = options[0]
+        if source.kind == "board" and not target:
+            self.option_combo.addItem(tr("board_pick"), None)
+        self.options = options
+        for option in options:
+            self.option_combo.addItem(option.name, option.id)
+        self.option_combo.setCurrentIndex(max(0, self.option_combo.findData(target.id)) if target else 0)
+        self.option_combo.setEnabled(True)
+        self.option_combo.blockSignals(False)
+        self._render_guess()
+        self._option_changed()
+
+    def _option(self) -> catalog.Option | None:
+        option_id = self.option_combo.currentData()
+        return next((o for o in self.options if o.id == option_id), None) if self._catalog_mode else None
+
+    def _render_guess(self) -> None:
+        shown = bool(self._guess) and self._catalog_mode
+        if shown:
+            key, values = self._guess
+            self.board_guess.setText(tr(key, **values))
+        self.board_guess.setVisible(shown)
+
+    def _option_changed(self) -> None:
+        source, option = self._source(), self._option()
+        self.board_note.setText(option.note if option else "")
+        self.board_note.setVisible(bool(option and option.note))
+        if not source or not option:
+            self._fw_key = None
+            self.firmware = None
+            self._render_firmware()
+            self._build_setup("")
+            self._update_buttons()
+            return
+        self.settings.setValue(f"option/{source.id}", option.id)
+        self.usb_ids = option.usb
+        if self._fw_key == (source.id, option.id) and self.firmware:
+            self._render_firmware()     # the board changed, the firmware didn't: its build may have
+            return
+        self._fw_key = (source.id, option.id)
+        self._load_manifest((source, option), source.setup)
 
     def _start_loader(self, job: workers.Job, on_done) -> None:
         if self.loader and self.loader.isRunning():
@@ -570,115 +723,6 @@ class MainWindow(QMainWindow):
         job.log.connect(self.log_event)
         job.done.connect(on_done)
         job.start()
-
-    def _load_boards(self) -> None:
-        source = self._source()
-        if not source:
-            return
-        self.board_combo.blockSignals(True)
-        self.board_combo.clear()
-        self.board_combo.addItem(tr("boards_loading"))
-        self.board_combo.setEnabled(False)
-        self.board_combo.blockSignals(False)
-        self._start_loader(workers.BoardsJob(source, self), self._boards_loaded)
-
-    def _boards_loaded(self, ok: bool, key: str, detail: str, boards) -> None:
-        self.board_combo.blockSignals(True)
-        self.board_combo.clear()
-        if not ok:
-            self.board_combo.addItem(tr("boards_failed"))
-            self.board_combo.blockSignals(False)
-            self.log_event(f"{tr(key)} {detail}")
-            return
-        self.boards = boards
-        for board in boards:
-            self.board_combo.addItem(board.name, board.id)
-        saved = self.settings.value("board", "")
-        self.board_combo.setCurrentIndex(max(0, self.board_combo.findData(saved)))
-        self.board_combo.setEnabled(True)
-        self.board_combo.blockSignals(False)
-        self.log_event(f"{tr(key)}: {len(boards)}")
-        self._board_changed()
-        self._describe_boards()
-
-    @property
-    def _catalog_mode(self) -> bool:
-        return self.mode_stack.currentIndex() == 0
-
-    def _board(self) -> catalog.Board | None:
-        i = self.board_combo.currentIndex()
-        return self.boards[i] if self._catalog_mode and 0 <= i < len(self.boards) else None
-
-    def _describe_boards(self) -> None:
-        if self.describer and self.describer.isRunning():
-            self.describer.stop()
-            self.describer.wait(3000)
-        boards = self.boards
-
-        def done(_ok, _key, _detail, _result):
-            if boards is self.boards:
-                self._match_boards()
-
-        self.describer = workers.BoardInfoJob(boards, self)
-        self.describer.done.connect(done)
-        self.describer.start()
-
-    def _match_boards(self) -> None:
-        """Ticks the boards that suit the detected chip, and picks one when it's clear which."""
-        info, current = self.detected, self._board()
-        self._guess = None
-        fits = [b for b in self.boards if info and catalog.board_fits(b, info.family, info.flash_bytes)]
-        if self.board_combo.count() == len(self.boards):      # not while a reload shows "loading"
-            for i, board in enumerate(self.boards):
-                self.board_combo.setItemText(i, f"✓ {board.name}" if board in fits else board.name)
-        if not info or not self._catalog_mode or not self.boards:
-            self._render_guess()
-            return
-        target = None
-        source = self._source()
-        remembered = str(self.settings.value(f"device/{_mac_key(info.mac)}/board", ""))
-        if source and remembered.startswith(source.id + "/"):
-            target = next((b for b in self.boards if b.id == remembered.split("/", 1)[1]), None)
-            if target:
-                self._guess = ("board_remembered", {"name": target.name})
-        if not target and any(b.chips for b in self.boards):
-            port = next((p for p in self._ports if p.device == self._current_port()), None)
-            matches = catalog.match_boards(self.boards, info.family, info.flash_bytes, port.usb_id if port else "")
-            if len(matches) == 1:
-                target = matches[0]
-                self._guess = ("board_matched", {"name": target.name})
-            elif matches:
-                # Several fit: guessing could flash another board's firmware, so the user picks.
-                flash = info.flash_bytes >> 20 if info.flash_bytes else "?"
-                key = "board_candidates" if current in fits else "board_current_wrong"
-                self._guess = (key, {"n": len(fits), "family": info.family, "flash": flash,
-                                     "name": current.name if current else ""})
-            else:
-                self._guess = ("board_none", {"family": info.family})
-        self._render_guess()
-        if target and target is not current:
-            self.board_combo.setCurrentIndex(self.boards.index(target))
-
-    def _render_guess(self) -> None:
-        shown = bool(self._guess) and self._catalog_mode
-        if shown:
-            key, values = self._guess
-            self.board_guess.setText(tr(key, **values))
-            self.board_guess.setObjectName("WarningHint" if key in ("board_current_wrong", "board_none") else "FieldHint")
-            self.board_guess.style().unpolish(self.board_guess)
-            self.board_guess.style().polish(self.board_guess)
-        self.board_guess.setVisible(shown)
-
-    def _board_changed(self) -> None:
-        board = self._board()
-        if not board:
-            return
-        self.settings.setValue("board", board.id)
-        self.board_note.setText(board.note)
-        self.board_note.setVisible(bool(board.note))
-        self.usb_ids = board.usb
-        source = self._source()
-        self._load_manifest(board.manifest_url, source.setup if source else "")
 
     # ---- firmware: URL and local -------------------------------------------
 
@@ -716,9 +760,13 @@ class MainWindow(QMainWindow):
             key = str(exc) if str(exc) in i18n.STRINGS["en"] else "bad_value"
             self.set_status("need_firmware", key, "error")
             return
+        self._fw_key = None
         self._set_firmware(fw, "")
 
-    def _load_manifest(self, location: str, profile: str) -> None:
+    def _load_manifest(self, location, profile: str) -> None:
+        """Loads a URL or file, or a catalog (source, option)."""
+        if not isinstance(location, tuple):
+            self._fw_key = None
         self.firmware = None
         self._render_firmware()
         self._update_buttons()
@@ -735,7 +783,7 @@ class MainWindow(QMainWindow):
 
     def _set_firmware(self, fw: manifest.Manifest, profile: str) -> None:
         # Firmware from a URL or file gets Muse's setup when it says it's Muse.
-        if not profile and "muse gadget" in fw.name.lower():
+        if not profile and re.search(r"\bmuse\b", fw.name, re.I):
             profile = "muse"
         self.firmware = fw
         self.erase_check.setChecked(False)
@@ -752,12 +800,32 @@ class MainWindow(QMainWindow):
         if not fw:
             self.fw_name.setText(tr("fw_none"))
             self.fw_meta.setText("")
+            self.fw_build.setVisible(False)
             return
         self.fw_name.setText(tr("fw_summary", name=fw.name, version=fw.version or "—"))
         meta = [tr("fw_chips", chips=", ".join(fw.chip_families))]
         if fw.min_flash_bytes:
             meta.append(tr("fw_min_flash", mb=f"{fw.min_flash_bytes / (1 << 20):.1f}"))
         self.fw_meta.setText("  ·  ".join(meta))
+        self.fw_build.setText(self._build_text(fw))
+        self.fw_build.setVisible(bool(self.fw_build.text()))
+
+    def _build_text(self, fw: manifest.Manifest) -> str:
+        """Which of the firmware's builds the detected board gets, when that's worth saying."""
+        info = self.detected
+        if not info:
+            return ""
+        if info.family not in fw.chip_families:
+            return tr("fw_not_for_chip", family=info.family)
+        build = fw.build_for(info.family, info.flash_bytes, info.psram)
+        if not build:
+            return tr("err_flash_too_small")
+        variant = [info.family]
+        if build.flash_bytes:
+            variant.append(f"{build.flash_bytes >> 20} MB" if build.flash_bytes >= 1 << 20 else f"{build.flash_bytes >> 10} KB")
+        if build.psram:
+            variant.append(tr(f"psram_{build.psram}"))
+        return tr("fw_build", build=" · ".join(variant))
 
     # ---- setup fields ------------------------------------------------------
 
@@ -777,7 +845,7 @@ class MainWindow(QMainWindow):
         self.setup_layout.addSpacing(6)
         self.setup_layout.addWidget(_rule())
         self.setup_layout.addSpacing(6)
-        self.setup_layout.addWidget(_label("03 / SETUP", "PanelEyebrow"))
+        self.setup_layout.addWidget(_label("04 / SETUP", "PanelEyebrow"))
         self.setup_layout.addWidget(_label(tr("section_setup"), "PanelTitle"))
         self.setup_layout.addWidget(_label(tr("setup_hint"), "FieldHint", wrap=True))
         # Required fields first on screen; the send order stays the profile's.
@@ -859,7 +927,7 @@ class MainWindow(QMainWindow):
             # Another port, or the board went away: what we knew is stale.
             self.detected = None
             self._render_detected()
-            self._match_boards()
+            self._fill_sources()
         if port:
             self.settings.setValue("port", port)
         self._update_buttons()
@@ -934,7 +1002,7 @@ class MainWindow(QMainWindow):
         self.detected = info
         self._detected_port = self._current_port()
         self._render_detected()
-        self._match_boards()
+        self._fill_sources()
 
     # ---- jobs --------------------------------------------------------------
 
@@ -954,6 +1022,7 @@ class MainWindow(QMainWindow):
         self.port_combo.setEnabled(not busy)
         self.baud_combo.setEnabled(not busy)
         self.stop_btn.setEnabled(busy)
+        self.reload_btn.setEnabled(not (self.catalog_job and self.catalog_job.isRunning()))
 
     def _start_job(self, job: workers.Job, on_done) -> None:
         self.job = job
@@ -1026,10 +1095,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("baud", baud)
         self.log_event(f"{fw.name} → {port} @ {baud}")
 
-        board, source = self._board(), self._source()
+        option, source = self._option(), self._source()
         job = workers.FlashJob(fw, port, baud, self.erase_check.isChecked(),
                                self.backup_folder if self.auto_backup.isChecked() else None,
-                               board.id if board else "", self)
+                               option.id if option else "", self)
 
         def done(ok, key, detail, info):
             if job.backup_made:
@@ -1039,11 +1108,11 @@ class MainWindow(QMainWindow):
                 self._fail(key, detail)
                 return
             if info and info.mac:
-                # Next time this board is plugged in, its board is picked for it.
-                if board and source:
-                    self.settings.setValue(f"device/{_mac_key(info.mac)}/board", f"{source.id}/{board.id}")
+                # Next time this board is plugged in, the same firmware is offered first.
+                if option and source:
+                    self.settings.setValue(f"device/{_mac_key(info.mac)}/firmware", f"{source.id}/{option.id}")
                 else:
-                    self.settings.remove(f"device/{_mac_key(info.mac)}/board")
+                    self.settings.remove(f"device/{_mac_key(info.mac)}/firmware")
             follow = "msg_flashed_detail" if self._setup_inputs else "msg_flashed_plain"
             self.set_status(key, follow, "success", tr("msg_backup_then_flashed") if job.backup_made else "")
             self.log_event(tr(key))
@@ -1054,7 +1123,7 @@ class MainWindow(QMainWindow):
         port = self._current_port()
         if not port or self.busy:
             return
-        board = self._board()
+        option = self._option()
 
         def done(ok, key, detail, backup):
             if not ok:
@@ -1065,7 +1134,7 @@ class MainWindow(QMainWindow):
             self.log_event(f"{tr(key)}: {backup.path}")
 
         job = workers.BackupJob(port, self.baud_combo.currentData(), self.backup_folder,
-                                board.id if board else "", self)
+                                option.id if option else "", self)
         self._start_job(job, done)
 
     def _restore(self) -> None:
@@ -1100,7 +1169,7 @@ class MainWindow(QMainWindow):
                 self._fail(key, detail)
                 return
             if info and info.mac:
-                self.settings.remove(f"device/{_mac_key(info.mac)}/board")
+                self.settings.remove(f"device/{_mac_key(info.mac)}/firmware")
             self.set_status("msg_restored", "msg_restored_detail", "success")
             self.log_event(tr("msg_restored"))
 
@@ -1170,7 +1239,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.port_timer.stop()
-        running = [j for j in (self.job, self.loader, self.describer) if j and j.isRunning()]
+        running = [j for j in (self.job, self.loader, self.catalog_job) if j and j.isRunning()]
         if running:
             self._closing = True
             for job in running:

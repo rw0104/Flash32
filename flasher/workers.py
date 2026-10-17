@@ -182,37 +182,35 @@ def explain_esptool_failure(output: str) -> str:
     return "err_esptool"
 
 
-class BoardsJob(Job):
-    def __init__(self, source: catalog.Source, parent=None):
+class CatalogJob(Job):
+    """Lists every source's options, then learns which chips each suits."""
+    listed = Signal()          # options listed; chips may still be coming
+
+    def __init__(self, sources: list[catalog.Source], parent=None):
         super().__init__(parent)
-        self.source = source
+        self.sources = sources
 
     def work(self):
         self.stage.emit("stage_loading_boards")
-        return True, "msg_boards_loaded", "", catalog.fetch_boards(self.source)
+        catalog.load_sources(self.sources, self.listed.emit, lambda: self.stopped)
+        return True, "msg_boards_loaded", "", self.sources
 
 
 class ManifestJob(Job):
-    def __init__(self, location: str, parent=None):
+    """A manifest from a URL or file, or a catalog option's (source, option)."""
+
+    def __init__(self, location, parent=None):
         super().__init__(parent)
         self.location = location
 
     def work(self):
         self.stage.emit("stage_loading_manifest")
+        if isinstance(self.location, tuple):
+            source, option = self.location
+            self.emit_log(option.manifest_url or f"{source.id}: {option.name}")
+            return True, "msg_manifest_loaded", "", catalog.load_option(source, option)
         self.emit_log(self.location)
         return True, "msg_manifest_loaded", "", manifest.load_manifest(self.location)
-
-
-class BoardInfoJob(Job):
-    """Reads each board's manifest for its chips, so a detected board can be matched."""
-
-    def __init__(self, boards: list[catalog.Board], parent=None):
-        super().__init__(parent)
-        self.boards = boards
-
-    def work(self):
-        catalog.describe_boards(self.boards, lambda: self.stopped)
-        return True, "", "", self.boards
 
 
 class DetectJob(Job):
@@ -247,9 +245,16 @@ class FlashJob(Job):
         self.backup_made: backups.Backup | None = None
 
     def choose_build(self, info: esptool_jobs.ChipInfo) -> manifest.Build:
-        build = self.fw.build_for(info.family)
-        if not build:
+        if info.family not in self.fw.chip_families:
             raise JobFailed("err_wrong_chip", f"{info.family} ≠ {', '.join(self.fw.chip_families)}", info)
+        build = self.fw.build_for(info.family, info.flash_bytes, info.psram)
+        if not build:
+            least = min(b.flash_bytes for b in self.fw.builds if b.chip_family == info.family)
+            raise JobFailed("err_flash_too_small", f"{info.flash_bytes >> 20} MB < {least / (1 << 20):g} MB", info)
+        variant = " ".join(t for t in (f"{build.flash_bytes >> 20} MB" if build.flash_bytes >= 1 << 20 else "",
+                                       build.psram) if t)
+        if variant:
+            self.emit_log(f"{info.family} build: {variant}")
         if self.fw.min_flash_bytes and info.flash_bytes and info.flash_bytes < self.fw.min_flash_bytes:
             need = self.fw.min_flash_bytes / (1 << 20)
             raise JobFailed("err_flash_too_small", f"{info.flash_bytes >> 20} MB < {need:.1f} MB", info)
@@ -280,7 +285,8 @@ class FlashJob(Job):
             if value is not None:
                 self.progress.emit(value)
 
-        args = esptool_jobs.flash_args(self.port, self.baud, build.esptool_chip, files, self.erase_all)
+        args = esptool_jobs.flash_args(self.port, self.baud, build.esptool_chip, files, self.erase_all,
+                                       build.detect_flash_size)
         code, output = self.run_esptool(args, on_line)
         if code != 0:
             return False, explain_esptool_failure(output), "", info

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
 import urllib.parse
 import urllib.request
@@ -49,6 +50,11 @@ class Part:
 class Build:
     chip_family: str
     parts: list[Part]
+    # Flash32 extension (a build's "flash32" object): one chip can have several
+    # builds, for a flash size and/or a PSRAM kind ("octal", "quad", "none").
+    flash_bytes: int = 0
+    psram: str = ""
+    detect_flash_size: bool = False   # have esptool set the bootloader's flash size
 
     @property
     def esptool_chip(self) -> str:
@@ -65,15 +71,46 @@ class Manifest:
     min_flash_bytes: int = 0         # Muse SDK extension: flash the partitions need
     extra: dict = field(default_factory=dict)
 
-    def build_for(self, chip_family: str) -> Build | None:
-        for build in self.builds:
-            if build.chip_family == chip_family:
-                return build
-        return None
+    def build_for(self, chip_family: str, flash_bytes: int = 0, psram: str = "") -> Build | None:
+        """The build for this chip: of several, the one for the board's flash
+        size (the largest that fits) and PSRAM. None if none fits."""
+        builds = [b for b in self.builds if b.chip_family == chip_family]
+        if flash_bytes:
+            builds = [b for b in builds if b.flash_bytes <= flash_bytes]
+        if not builds:
+            return None
+
+        def score(build: Build):
+            psram_fit = (build.psram == psram) if psram else build.psram in ("", "none")
+            return (build.flash_bytes == flash_bytes, psram_fit, build.flash_bytes)
+
+        return max(builds, key=score)      # ties: the manifest's first
 
     @property
     def chip_families(self) -> list[str]:
-        return [b.chip_family for b in self.builds]
+        return list(dict.fromkeys(b.chip_family for b in self.builds))
+
+
+def parse_size(text) -> int:
+    """'16MB', '512KB' or a byte count, as bytes; 0 if absent or odd."""
+    if isinstance(text, int):
+        return max(text, 0)
+    match = re.fullmatch(r"\s*(\d+)\s*([KM]?)B?\s*", str(text or ""), re.I)
+    if not match:
+        return 0
+    return int(match.group(1)) << {"": 0, "K": 10, "M": 20}[match.group(2).upper()]
+
+
+def fill_template(data, values: dict[str, str]):
+    """A manifest template with each {name} in its strings replaced."""
+    if isinstance(data, dict):
+        return {k: fill_template(v, values) for k, v in data.items()}
+    if isinstance(data, list):
+        return [fill_template(v, values) for v in data]
+    if isinstance(data, str):
+        for key, value in values.items():
+            data = data.replace("{" + key + "}", value)
+    return data
 
 
 def _is_url(text: str) -> bool:
@@ -107,7 +144,10 @@ def parse_manifest(data: dict, source: str) -> Manifest:
                 raise ManifestError("manifest_bad_part")
             parts.append(Part(_resolve(source, path), offset))
         if parts:
-            builds.append(Build(family, sorted(parts, key=lambda p: p.offset)))
+            ext = raw.get("flash32") if isinstance(raw.get("flash32"), dict) else {}
+            builds.append(Build(family, sorted(parts, key=lambda p: p.offset),
+                                parse_size(ext.get("flash")), str(ext.get("psram") or ""),
+                                bool(ext.get("detect_flash_size"))))
     if not builds:
         raise ManifestError("manifest_no_builds")
     return Manifest(
