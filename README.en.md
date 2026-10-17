@@ -59,8 +59,6 @@ Images are written at their own offsets like `idf.py flash`, not merged, so upda
 
 ## Run from source / build
 
-Code layout, design notes and the release process (in Chinese): [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
 Python 3.12+, on Windows, macOS or Linux:
 
 ```bash

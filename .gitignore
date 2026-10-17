@@ -5,3 +5,6 @@ __pycache__/
 /.venv*/
 *.spec
 *.log
+
+# Local development notes: kept on this machine, never pushed.
+/docs/
