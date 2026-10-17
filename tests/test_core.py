@@ -149,6 +149,10 @@ class ProvisionTests(unittest.TestCase):
         self.assertFalse(fields["sdk_token"].valid("mgst_short"))
         self.assertTrue(fields["tts_key"].valid("sk-ws-abc.DEF_123-xyz"))
         self.assertFalse(fields["tts_key"].valid("sk-has space"))
+        for rate in ("0.5", "1", "1.0", "1.1", "1.25", "2.0"):
+            self.assertTrue(fields["tts_rate"].valid(rate), rate)
+        for rate in ("0.4", "2.1", "110", "1.234", "-1", ""):
+            self.assertFalse(fields["tts_rate"].valid(rate), rate)
         self.assertEqual(provision.PROFILES["muse"][-1].command, "sdk_token")
         self.assertTrue(all(not f.restarts for f in provision.PROFILES["muse"][:-1]))
 

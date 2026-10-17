@@ -3,7 +3,7 @@
 A firmware's setup profile lists fields, each sent as the console line
 ">command=value", which the device answers with "@command ok", "@command
 cleared" or "@command error <why>". The Muse SDK takes its SDK token this
-way (esp32/main/sdk_token_console.h); its Qwen TTS fork adds tts_key/tts_voice.
+way (esp32/main/sdk_token_console.h); its Qwen TTS fork adds tts_key/tts_voice/tts_rate.
 """
 
 from __future__ import annotations
@@ -34,6 +34,8 @@ PROFILES: dict[str, list[Field]] = {
         Field("tts_key", "field_tts_key", "hint_tts_key", r"sk-[A-Za-z0-9._-]{8,250}",
               link="https://bailian.console.aliyun.com/"),
         Field("tts_voice", "field_tts_voice", "hint_tts_voice", r"[A-Za-z0-9._-]{1,31}", secret=False),
+        Field("tts_rate", "field_tts_rate", "hint_tts_rate", r"0\.[5-9][0-9]?|1(\.[0-9]{1,2})?|2(\.00?)?",
+              secret=False),
         Field("sdk_token", "field_sdk_token", "hint_sdk_token", r"mgst_[A-Za-z0-9_-]{16,}",
               required=True, restarts=True, link="https://gadgets.muse.ai/settings/sdk-tokens"),
     ],
