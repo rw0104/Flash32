@@ -1,0 +1,16 @@
+{
+  "sources": [
+    {
+      "id": "muse",
+      "name": {"zh": "Muse Gadget（Meta 开源语音助手）", "en": "Muse Gadget (Meta, open-source voice gadget)"},
+      "description": {
+        "zh": "Meta 开源的 Muse 硬件固件：和 Muse App 配对后，按键说话、屏幕显示回复。刷完需要写入在 gadgets.muse.ai 申请的 SDK token。",
+        "en": "Meta's open-source Muse gadget firmware: pair it with the Muse app, push to talk, replies on screen. Needs an SDK token from gadgets.muse.ai after flashing."
+      },
+      "homepage": "https://github.com/facebookincubator/muse-gadget-sdk",
+      "boards_url": "https://facebookincubator.github.io/muse-gadget-sdk/boards.json",
+      "manifest_url": "https://facebookincubator.github.io/muse-gadget-sdk/firmware/{board}/manifest.json",
+      "setup": "muse"
+    }
+  ]
+}
